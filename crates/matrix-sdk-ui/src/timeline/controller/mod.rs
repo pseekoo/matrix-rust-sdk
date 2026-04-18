@@ -213,6 +213,16 @@ pub(super) struct TimelineSettings {
 
     /// Should the timeline items be grouped by day or month?
     pub(super) date_divider_mode: DateDividerMode,
+
+    /// If `Some(n)`, only the last `n` events from the room event cache are
+    /// seeded into the timeline on initial subscribe. Older events remain
+    /// in the event cache and become available via `paginate_backwards()`.
+    ///
+    /// Motivation: rooms with very large cached backlogs (bot channels,
+    /// busy public rooms) otherwise block first-frame paint while the
+    /// timeline controller materialises every cached event. Capping the
+    /// initial window shifts that cost into user-driven pagination.
+    pub(super) initial_event_limit: Option<usize>,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -232,6 +242,7 @@ impl Default for TimelineSettings {
             event_filter: Arc::new(default_event_filter),
             add_failed_to_parse: true,
             date_divider_mode: DateDividerMode::Daily,
+            initial_event_limit: None,
         }
     }
 }
@@ -379,7 +390,17 @@ impl<P: RoomDataProvider> TimelineController<P> {
         match focus {
             TimelineFocus::Live { .. } => {
                 // Retrieve the cached events, and add them to the timeline.
-                let events = room_event_cache.events().await?;
+                let mut events = room_event_cache.events().await?;
+
+                // Apply the initial-event cap if configured. Older events
+                // stay in the room event cache and remain reachable via
+                // `paginate_backwards`. See `TimelineBuilder::with_initial_event_limit`.
+                if let Some(limit) = self.settings.initial_event_limit
+                    && events.len() > limit
+                {
+                    let drop_count = events.len() - limit;
+                    events.drain(..drop_count);
+                }
 
                 let has_events = !events.is_empty();
 

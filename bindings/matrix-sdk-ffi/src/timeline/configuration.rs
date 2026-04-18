@@ -234,4 +234,14 @@ pub struct TimelineConfiguration {
     /// Whether this timeline instance should report UTDs through the client's
     /// delegate.
     pub report_utds: bool,
+
+    /// If set, cap how many of the room's cached events are seeded into
+    /// the timeline on initial subscribe. Older events remain in the
+    /// room event cache and become available via `paginate_backwards`.
+    ///
+    /// Intended for latency-sensitive UIs opening rooms with very large
+    /// cached backlogs (bot channels, busy public rooms). Leaving this
+    /// unset preserves the historical behaviour of replaying every
+    /// cached event on first subscribe.
+    pub initial_event_limit: Option<u32>,
 }

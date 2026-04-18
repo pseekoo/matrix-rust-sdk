@@ -291,6 +291,10 @@ impl Room {
             }
         }
 
+        if let Some(limit) = configuration.initial_event_limit {
+            builder = builder.with_initial_event_limit(limit as usize);
+        }
+
         let timeline = builder.build().await?;
 
         Ok(Timeline::new(timeline))

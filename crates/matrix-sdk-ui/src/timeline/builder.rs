@@ -106,6 +106,23 @@ impl TimelineBuilder {
         self
     }
 
+    /// Cap how many of the room's cached events are seeded into the
+    /// timeline on initial subscribe.
+    ///
+    /// If set, only the most recent `limit` events are materialised as
+    /// timeline items when the timeline first starts. Older events
+    /// remain in the event cache and are served on demand when the
+    /// client calls [`Timeline::paginate_backwards`].
+    ///
+    /// Intended for latency-sensitive UIs opening rooms with large
+    /// cached backlogs (bot channels, busy public rooms). Leaving this
+    /// unset preserves the historical behaviour of replaying every
+    /// cached event on first subscribe.
+    pub fn with_initial_event_limit(mut self, limit: usize) -> Self {
+        self.settings.initial_event_limit = Some(limit);
+        self
+    }
+
     /// Use the given filter to choose whether to add events to the timeline.
     ///
     /// # Arguments
