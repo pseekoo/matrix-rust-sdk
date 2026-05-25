@@ -43,7 +43,8 @@ use ruma::{
             join_rules::JoinRule as RumaJoinRule, message::RoomMessageEventContentWithoutRelation,
             MediaSource as RumaMediaSource,
         },
-        AnyMessageLikeEventContent, AnySyncTimelineEvent,
+        tag::{TagEvent, TagInfo as RumaTagInfo, TagName as RumaTagName},
+        AnyMessageLikeEventContent, AnySyncTimelineEvent, RoomAccountDataEventType,
     },
     EventId, Int, OwnedDeviceId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomAliasId,
     ServerName, UserId,
@@ -422,6 +423,64 @@ impl Room {
     ) -> Result<(), ClientError> {
         self.inner.set_is_low_priority(is_low_priority, tag_order).await?;
         Ok(())
+    }
+
+    /// Sets a tag on the room (creates or updates the tag).
+    ///
+    /// `tag` is the wire-form tag name (e.g. `"u.work"`, `"m.favourite"`,
+    /// `"m.lowpriority"`, or any custom `m.*` / `u.*` value). Parsing is
+    /// delegated to ruma's `TagName::from(&str)` which dispatches to the
+    /// correct enum variant.
+    ///
+    /// `tag_order` is the optional sort order (`Option<f64>`) — `None` writes
+    /// a `TagInfo` with no order field.
+    pub async fn set_tag(
+        &self,
+        tag: String,
+        tag_order: Option<f64>,
+    ) -> Result<(), ClientError> {
+        let tag_name = RumaTagName::from(tag.as_str());
+        let tag_info = assign!(RumaTagInfo::new(), { order: tag_order });
+        self.inner.set_tag(tag_name, tag_info).await?;
+        Ok(())
+    }
+
+    /// Removes a tag from the room.
+    ///
+    /// `tag` is the wire-form tag name (e.g. `"u.work"`, `"m.favourite"`).
+    /// If the tag is not present the upstream SDK still issues the delete
+    /// request and returns Ok.
+    pub async fn remove_tag(&self, tag: String) -> Result<(), ClientError> {
+        let tag_name = RumaTagName::from(tag.as_str());
+        self.inner.remove_tag(tag_name).await?;
+        Ok(())
+    }
+
+    /// Reads the room's `m.tag` account-data event and returns a
+    /// `HashMap<tag_id, order>` map.
+    ///
+    /// - Keys are the wire-form tag name (`"u.work"`, `"m.favourite"`, …).
+    /// - Values are the `order` field; `0.0` is used when the tag exists but
+    ///   has no order set (UniFFI HashMap can't carry `Option<f64>` cleanly,
+    ///   and the iOS layer treats `0.0` as "no explicit order").
+    /// - Returns an empty map when no `m.tag` event exists for the room.
+    pub async fn tags(&self) -> Result<HashMap<String, f64>, ClientError> {
+        let Some(raw_event) =
+            self.inner.account_data(RoomAccountDataEventType::Tag).await?
+        else {
+            return Ok(HashMap::new());
+        };
+        let event: TagEvent =
+            raw_event.deserialize_as_unchecked().map_err(|e| ClientError::Generic {
+                msg: format!("Failed to deserialize m.tag event: {e}"),
+                details: Some(format!("{e:?}")),
+            })?;
+        Ok(event
+            .content
+            .tags
+            .into_iter()
+            .map(|(name, info)| (name.to_string(), info.order.unwrap_or(0.0)))
+            .collect())
     }
 
     /// Send a raw event to the room.
