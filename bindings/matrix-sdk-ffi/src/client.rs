@@ -298,6 +298,40 @@ pub trait SyncNotificationListener: SyncOutsideWasm + SendOutsideWasm {
     fn on_notification(&self, notification: NotificationItem, room_id: String);
 }
 
+/// An incoming to-device event, delivered after Olm decryption.
+#[derive(uniffi::Record)]
+pub struct ToDeviceEventPayload {
+    /// The event type, e.g. `io.element.call.encryption_keys`.
+    pub event_type: String,
+    /// The user ID of the sender.
+    pub sender: String,
+    /// The device the event was sent from, when it arrived encrypted and the
+    /// sending device could be identified.
+    ///
+    /// MatrixRTC needs this to bind a media key to a specific participant
+    /// device, since one user can be in a call from several devices at once.
+    pub sender_device_id: Option<String>,
+    /// The event's `content` object, serialized as JSON.
+    pub content_json: String,
+    /// Whether the event arrived Olm-encrypted. Callers that treat the content
+    /// as sensitive should refuse to act on an event where this is false.
+    pub is_encrypted: bool,
+}
+
+/// A listener for incoming to-device events of one event type.
+#[matrix_sdk_ffi_macros::export(callback_interface)]
+pub trait ToDeviceEventListener: SyncOutsideWasm + SendOutsideWasm {
+    /// Called for each matching to-device event.
+    fn on_event(&self, event: ToDeviceEventPayload);
+}
+
+/// The devices a to-device message could not be delivered to.
+#[derive(uniffi::Record)]
+pub struct ToDeviceRecipient {
+    pub user_id: String,
+    pub device_id: String,
+}
+
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct TransmissionProgress {
     pub current: u64,
@@ -422,6 +456,140 @@ impl Client {
 
 #[matrix_sdk_ffi_macros::export]
 impl Client {
+    /// Subscribe to incoming to-device events of a single event type.
+    ///
+    /// Events are delivered after Olm decryption, so `content_json` carries the
+    /// plaintext content for encrypted events. This exists for MatrixRTC, which
+    /// receives per-participant call media keys as
+    /// `io.element.call.encryption_keys` to-device events; before this, only the
+    /// in-process widget driver could observe them.
+    ///
+    /// Filtering happens here rather than on the caller's side so a subscriber
+    /// is not woken for every unrelated to-device message.
+    ///
+    /// The subscription lives until the returned handle is dropped.
+    pub fn subscribe_to_device_events(
+        &self,
+        event_type: String,
+        listener: Box<dyn ToDeviceEventListener>,
+    ) -> Arc<TaskHandle> {
+        let listener: Arc<dyn ToDeviceEventListener> = Arc::from(listener);
+
+        let handle = self.inner.add_event_handler(
+            move |raw: Raw<matrix_sdk::ruma::events::AnyToDeviceEvent>,
+                  encryption_info: Option<matrix_sdk::deserialized_responses::EncryptionInfo>| {
+                let listener = listener.clone();
+                let wanted_type = event_type.clone();
+
+                async move {
+                    // A decrypted event reports its inner type here, which is
+                    // what we want to match on.
+                    let Ok(Some(actual_type)) = raw.get_field::<String>("type") else { return };
+                    if actual_type != wanted_type {
+                        return;
+                    }
+
+                    let Ok(Some(sender)) = raw.get_field::<String>("sender") else { return };
+
+                    let content_json = match raw.get_field::<serde_json::Value>("content") {
+                        Ok(Some(content)) => content.to_string(),
+                        // An event of the right type with no readable content is
+                        // malformed; drop it rather than surfacing an empty one.
+                        _ => return,
+                    };
+
+                    let is_encrypted = encryption_info.is_some();
+                    let sender_device_id = encryption_info
+                        .and_then(|info| info.sender_device)
+                        .map(|device_id| device_id.to_string());
+
+                    listener.on_event(ToDeviceEventPayload {
+                        event_type: actual_type,
+                        sender,
+                        sender_device_id,
+                        content_json,
+                        is_encrypted,
+                    });
+                }
+            },
+        );
+
+        // Dropping the guard removes the event handler, so cancelling the
+        // returned TaskHandle actually ends the subscription.
+        let drop_guard = self.inner.event_handler_drop_guard(handle);
+
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
+            let _guard = drop_guard;
+            std::future::pending::<()>().await
+        })))
+    }
+
+    /// Olm-encrypt a custom event and send it to specific devices.
+    ///
+    /// `content_json` is the event content as a JSON string.
+    ///
+    /// Returns the devices the message could **not** be delivered to; an empty
+    /// list means every recipient got it. A partial failure is deliberately not
+    /// an error: MatrixRTC uses this to share call media keys, and one
+    /// unreachable device must not fail the call for everyone else.
+    ///
+    /// Keys are shared with unverified devices too
+    /// (`CollectStrategy::AllDevices`, the default and what Element X uses).
+    /// MSC4153 discourages that for room messages, but a call participant on an
+    /// unverified device would otherwise get silence rather than a warning.
+    pub async fn encrypt_and_send_to_device(
+        &self,
+        recipients: Vec<ToDeviceRecipient>,
+        event_type: String,
+        content_json: String,
+    ) -> Result<Vec<ToDeviceRecipient>, ClientError> {
+        let content = Raw::from_json_string(content_json)?;
+
+        let mut devices = Vec::with_capacity(recipients.len());
+        let mut undelivered = Vec::new();
+
+        for recipient in recipients {
+            let user_id = UserId::parse(&recipient.user_id)?;
+            let device_id: OwnedDeviceId = recipient.device_id.as_str().into();
+
+            match self.inner.encryption().get_device(&user_id, &device_id).await? {
+                Some(device) => devices.push(device),
+                // An unknown device is reported back rather than throwing, so
+                // the caller can decide whether it matters.
+                None => undelivered.push(recipient),
+            }
+        }
+
+        let withheld = self
+            .inner
+            .encryption()
+            .encrypt_and_send_raw_to_device(
+                devices.iter().collect(),
+                &event_type,
+                content,
+                matrix_sdk_base::crypto::CollectStrategy::AllDevices,
+            )
+            .await?;
+
+        undelivered.extend(withheld.into_iter().map(|(user_id, device_id)| ToDeviceRecipient {
+            user_id: user_id.to_string(),
+            device_id: device_id.to_string(),
+        }));
+
+        Ok(undelivered)
+    }
+
+    /// The device IDs currently known for a user.
+    ///
+    /// MatrixRTC addresses call media keys to the devices named in the call
+    /// membership state, but needs this to fall back to a user's full device
+    /// list when membership does not name one.
+    pub async fn user_device_ids(&self, user_id: String) -> Result<Vec<String>, ClientError> {
+        let user_id = UserId::parse(&user_id)?;
+        let devices = self.inner.encryption().get_user_devices(&user_id).await?;
+        Ok(devices.devices().map(|device| device.device_id().to_string()).collect())
+    }
+
     /// Perform database optimizations if any are available, i.e. vacuuming in
     /// SQLite.
     pub async fn optimize_stores(&self) -> Result<(), ClientError> {
