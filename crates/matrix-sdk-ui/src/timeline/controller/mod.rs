@@ -389,11 +389,8 @@ impl<P: RoomDataProvider> TimelineController<P> {
     ) -> Result<bool, Error> {
         match focus {
             TimelineFocus::Live { .. } => {
-                let t_fetch = std::time::Instant::now();
                 // Retrieve the cached events, and add them to the timeline.
                 let mut events = room_event_cache.events().await?;
-                let cached_count = events.len();
-                let fetch_ms = t_fetch.elapsed().as_millis();
 
                 // Apply the initial-event cap if configured. Older events
                 // stay in the room event cache and remain reachable via
@@ -407,20 +404,7 @@ impl<P: RoomDataProvider> TimelineController<P> {
 
                 let has_events = !events.is_empty();
 
-                eprintln!(
-                    "[SdkPerf] init_focus Live: cached={} after_cap={} fetch_ms={} limit={:?}",
-                    cached_count,
-                    events.len(),
-                    fetch_ms,
-                    self.settings.initial_event_limit,
-                );
-
-                let t_replace = std::time::Instant::now();
                 self.replace_with_initial_remote_events(events, RemoteEventOrigin::Cache).await;
-                eprintln!(
-                    "[SdkPerf] init_focus Live: replace_with_initial_remote_events {}ms",
-                    t_replace.elapsed().as_millis(),
-                );
 
                 match room_event_cache.pagination().status().get() {
                     PaginationStatus::Idle { hit_timeline_start } => {

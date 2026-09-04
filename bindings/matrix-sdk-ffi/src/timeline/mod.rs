@@ -279,12 +279,6 @@ impl Timeline {
     pub async fn add_listener(&self, listener: Box<dyn TimelineListener>) -> Arc<TaskHandle> {
         let (timeline_items, timeline_stream) = self.inner.subscribe().await;
 
-        eprintln!(
-            "[SdkPerf] FFI add_listener: initial items={} (reset will fire: {})",
-            timeline_items.len(),
-            !timeline_items.is_empty(),
-        );
-
         // It's important that the initial items are passed *before* we forward the
         // stream updates, with a guaranteed ordering. Otherwise, it could
         // be that the listener be called before the initial items have been
