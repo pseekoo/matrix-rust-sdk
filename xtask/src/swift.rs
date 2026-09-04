@@ -128,6 +128,7 @@ enum Platform {
     Macos,
     Ios,
     IosSimulator,
+    MacCatalyst,
     Watchos,
     WatchosSimulator,
 }
@@ -139,6 +140,7 @@ impl Platform {
             Platform::Macos => "macOS",
             Platform::Ios => "iOS",
             Platform::IosSimulator => "iOS Simulator",
+            Platform::MacCatalyst => "Mac Catalyst",
             Platform::Watchos => "watchOS",
             Platform::WatchosSimulator => "watchOS Simulator",
         }
@@ -151,6 +153,7 @@ impl Platform {
             Platform::Macos => "macos",
             Platform::Ios => "ios",
             Platform::IosSimulator => "ios-simulator",
+            Platform::MacCatalyst => "ios-maccatalyst",
             Platform::Watchos => "watchos",
             Platform::WatchosSimulator => "watchos-simulator",
         }
@@ -193,6 +196,12 @@ const TARGETS: &[Target] = &[
         platform: Platform::IosSimulator,
         status: TargetStatus::TopTier,
         description: "iOS Simulator (Intel) ",
+    },
+    Target {
+        triple: "aarch64-apple-ios-macabi",
+        platform: Platform::MacCatalyst,
+        status: TargetStatus::TopTier,
+        description: "Mac Catalyst (Apple Silicon)",
     },
     Target {
         triple: "aarch64-apple-watchos",
